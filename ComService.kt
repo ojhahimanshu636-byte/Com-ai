@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -18,16 +19,17 @@ class ComService : Service() {
 
     private lateinit var speaker: Speaker
     private lateinit var commands: Commands
+    private lateinit var audio: AudioManager
     private var recognizer: SpeechRecognizer? = null
     private val h = Handler(Looper.getMainLooper())
     private var running = false
     private var busy = false
 
-    // "com" / "hey com" / "ok com" detect karne ke liye
     private val wake = Regex("\\b(hey |hi |ok |okay )?(com|kom|kaam|calm|कॉम|कोम)\\b[,. ]*")
 
     override fun onCreate() {
         super.onCreate()
+        audio = getSystemService(AUDIO_SERVICE) as AudioManager
         val ch = NotificationChannel("com", "Com", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         val n = Notification.Builder(this, "com")
@@ -49,9 +51,20 @@ class ComService : Service() {
         return START_STICKY
     }
 
+    private fun muteBeep(mute: Boolean) {
+        try {
+            audio.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                if (mute) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE,
+                0
+            )
+        } catch (_: Exception) {}
+    }
+
     private fun listen() {
         if (!running || busy) return
-        recognizer?.destroy()
+        try { recognizer?.destroy() } catch (_: Exception) {}
+        muteBeep(true)
         recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onResults(r: Bundle?) {
@@ -60,11 +73,25 @@ class ComService : Service() {
                     val m = wake.find(text)
                     if (m != null) {
                         busy = true
+                        muteBeep(false)
                         val cmd = text.substring(m.range.last + 1).trim()
-                        commands.handle(cmd) { busy = false; h.postDelayed({ listen() }, 400) }
-                    } else listen()
+                        commands.handle(cmd) {
+                            busy = false
+                            h.postDelayed({ listen() }, 600)
+                        }
+                    } else {
+                        h.postDelayed({ listen() }, 300)
+                    }
                 }
-                override fun onError(e: Int) { h.postDelayed({ listen() }, 600) }
+                override fun onError(e: Int) {
+                    if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        muteBeep(false)
+                        stopSelf()
+                        return
+                    }
+                    val delay = if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1500L else 700L
+                    h.postDelayed({ listen() }, delay)
+                }
                 override fun onReadyForSpeech(p: Bundle?) {}
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(v: Float) {}
@@ -77,13 +104,16 @@ class ComService : Service() {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-IN")
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
             })
         }
     }
 
     override fun onDestroy() {
         running = false
-        recognizer?.destroy()
+        muteBeep(false)
+        try { recognizer?.destroy() } catch (_: Exception) {}
         speaker.shutdown()
         super.onDestroy()
     }
